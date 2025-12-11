@@ -3,8 +3,6 @@ MemOS记忆集成插件
 使用MemOS Python SDK实现记忆获取、注入和更新功能
 """
 
-import time
-
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api.provider import ProviderRequest, LLMResponse
@@ -54,44 +52,44 @@ class MemosIntegratorPlugin(Star):
             return False
             
     def _get_session_id(self, event: AstrMessageEvent) -> str:
-        """获取会话ID"""
-        # 根据平台和用户信息生成会话ID
-        platform = event.platform
-        user_id = event.get_user_id()
-        
-        # 对于群聊，使用群ID作为会话ID的一部分
-        if hasattr(event, 'group_id') and event.group_id:
-            session_id = f"{platform}_{event.group_id}"
-            logger.debug(f"群聊会话ID: {session_id}")
-        else:
-            session_id = f"{platform}_{user_id}"
-            logger.debug(f"私聊会话ID: {session_id}")
-            
+        """获取会话ID（统一消息来源）"""
+        # 使用AstrBot框架提供的统一消息来源作为会话ID
+        # 格式: platform_id:message_type:session_id
+        session_id = event.unified_msg_origin
+        logger.debug(f"会话ID: {session_id}")
         return session_id
-            
-    def _get_user_id(self, event: AstrMessageEvent) -> str:
-        """获取用户ID"""
-        user_id = f"astrbot_{event.platform}_{event.get_user_id()}"
-        logger.debug(f"生成用户ID: {user_id}")
-        return user_id
+
+    async def _get_conversation_id(self, event: AstrMessageEvent) -> str:
+        """获取当前对话ID"""
+        # 从框架的对话管理器获取当前对话ID
+        session_id = event.unified_msg_origin
+        conversation_id = await self.context.conversation_manager.get_curr_conversation_id(session_id)
+
+        # 如果没有对话，创建一个新对话
+        if not conversation_id:
+            conversation_id = await self.context.conversation_manager.new_conversation(session_id)
+            logger.info(f"为会话 {session_id} 创建新对话: {conversation_id}")
+        else:
+            logger.debug(f"使用现有对话ID: {conversation_id}")
+
+        return conversation_id
         
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """在LLM请求前获取记忆并注入"""
 
-        # 获取会话ID和用户ID
+        # 获取会话ID和对话ID（从AstrBot框架）
         session_id = self._get_session_id(event)
-        user_id = self._get_user_id(event)
-        conversation_id = f"{session_id}_{int(time.time())}"
-        
+        conversation_id = await self._get_conversation_id(event)
+
         # 提取用户消息
         user_message = req.prompt
-        logger.info(f"收到LLM请求，会话ID: {session_id}, 用户ID: {user_id}, 对话ID: {conversation_id}")
+        logger.info(f"收到LLM请求，会话ID: {session_id}, 对话ID: {conversation_id}")
         logger.debug(f"用户消息长度: {len(user_message)}")
-        
-        # 获取记忆
+
+        # 获取记忆（使用session_id作为user_id）
         memories = await self.memory_manager.retrieve_relevant_memories(
-            user_message, user_id, conversation_id
+            user_message, session_id, conversation_id
         )
         
         logger.debug(f"检索到 {len(memories)} 条相关记忆，会话ID: {session_id}")
@@ -134,12 +132,11 @@ class MemosIntegratorPlugin(Star):
         """在LLM响应后保存对话到记忆"""
 
         try:
-            # 获取会话ID和上下文
+            # 获取会话ID和对话ID（从AstrBot框架）
             session_id = self._get_session_id(event)
-            user_id = self._get_user_id(event)
-            conversation_id = f"{session_id}_{int(time.time())}"
-            
-            logger.info(f"收到LLM响应，会话ID: {session_id}, 用户ID: {user_id}, 对话ID: {conversation_id}")
+            conversation_id = await self._get_conversation_id(event)
+
+            logger.info(f"收到LLM响应，会话ID: {session_id}, 对话ID: {conversation_id}")
             
             # 获取用户消息和AI响应
             user_message = event.message_str
@@ -163,11 +160,11 @@ class MemosIntegratorPlugin(Star):
                 {"role": "assistant", "content": ai_response}
             ]
             
-            # 使用记忆管理器保存对话
+            # 使用记忆管理器保存对话（使用session_id作为user_id）
             success = await self.memory_manager.save_conversation(
                 user_message=user_message,
                 ai_response=ai_response,
-                user_id=user_id,
+                user_id=session_id,
                 conversation_id=conversation_id
             )
             
