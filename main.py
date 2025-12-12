@@ -18,6 +18,8 @@ class MemosIntegratorPlugin(Star):
         self.memory_manager = None
         self.memory_limit = 5
         self.prompt_language = "auto"
+        # 用于保存原始prompt的字典，key为session_id
+        self.original_prompts = {}
 
         # 在 __init__ 中初始化记忆管理器
         try:
@@ -80,8 +82,10 @@ class MemosIntegratorPlugin(Star):
         session_id = self._get_session_id(event)
         conversation_id = await self._get_conversation_id(event)
 
-        # 提取用户消息
+        # 提取用户消息并保存原始prompt
         user_message = req.prompt
+        self.original_prompts[session_id] = user_message  # 保存原始prompt
+
         logger.info(f"收到LLM请求，会话ID: {session_id}, 对话ID: {conversation_id}")
         logger.debug(f"用户消息长度: {len(user_message)}")
 
@@ -118,7 +122,6 @@ class MemosIntegratorPlugin(Star):
             logger.info(f"检测到语言: {language}, 模型类型: {model_type}")
 
             # 使用新的记忆注入逻辑
-            original_prompt = req.prompt
             req.prompt = await self.memory_manager.inject_memory_to_prompt(
                 user_message, memories, language, model_type
             )
@@ -126,13 +129,13 @@ class MemosIntegratorPlugin(Star):
             # 使用debug级别记录注入后的完整prompt
             logger.debug(f"记忆注入后的完整prompt:\n{req.prompt}")
             logger.info(f"已为会话 {session_id} 注入 {len(memories)} 条记忆")
-            logger.debug(f"原始prompt长度: {len(original_prompt)}, 注入后prompt长度: {len(req.prompt)}")
+            logger.debug(f"原始prompt长度: {len(user_message)}, 注入后prompt长度: {len(req.prompt)}")
         else:
             logger.info(f"未找到相关记忆，会话ID: {session_id}")
             
     @filter.on_llm_response()
     async def save_memories(self, event: AstrMessageEvent, resp: LLMResponse):
-        """在LLM响应后保存对话到记忆"""
+        """在LLM响应后保存对话到记忆，并清洗上下文中的记忆注入"""
 
         try:
             # 检查memory_manager是否已初始化
@@ -145,24 +148,39 @@ class MemosIntegratorPlugin(Star):
             conversation_id = await self._get_conversation_id(event)
 
             logger.info(f"收到LLM响应，会话ID: {session_id}, 对话ID: {conversation_id}")
-            
-            # 获取用户消息和AI响应
+
+            # 恢复原始prompt（避免记忆注入被保存到AstrBot对话历史）
+            if session_id in self.original_prompts:
+                original_prompt = self.original_prompts[session_id]
+
+                # 从event中获取ProviderRequest对象
+                req = event.get_extra("provider_request")
+                if req is not None:
+                    # 恢复原始prompt到req.prompt，这样_save_to_history会使用原始prompt
+                    req.prompt = original_prompt
+                    logger.debug(f"已恢复原始prompt到req.prompt，避免记忆注入被保存，长度: {len(original_prompt)}")
+                else:
+                    logger.warning("无法从event中获取provider_request，跳过上下文清洗")
+
+                # 清理已使用的原始prompt
+                del self.original_prompts[session_id]
+
+            # 获取用户消息和AI响应用于保存到MemOS
             user_message = event.message_str
             if not user_message:
                 logger.warning("未找到用户消息，跳过记忆保存")
                 return
-                
+
             # 从响应中提取AI回复内容
             ai_response = resp.completion_text
 
             if not ai_response:
                 logger.warning("未找到AI响应内容，跳过记忆保存")
                 return
-                
+
             logger.debug(f"用户消息长度: {len(user_message)}")
             logger.debug(f"AI响应长度: {len(ai_response)}")
-            
-            
+
             # 使用记忆管理器保存对话（使用session_id作为user_id）
             success = await self.memory_manager.save_conversation(
                 user_message=user_message,
@@ -170,7 +188,7 @@ class MemosIntegratorPlugin(Star):
                 user_id=session_id,
                 conversation_id=conversation_id
             )
-            
+
             if success:
                 logger.info(f"成功保存对话到记忆，会话ID: {session_id}")
             else:
