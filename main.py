@@ -88,6 +88,9 @@ class MemosIntegratorPlugin(Star):
         session_id = self._get_session_id(event)
         conversation_id = await self._get_conversation_id(event)
         user_message = req.prompt
+        
+        # 无论哪种注入方式，都保存原始prompt以便后续记忆保存
+        self.original_prompts[session_id] = user_message
 
         memories = await self.memory_manager.retrieve_relevant_memories(
             user_message, session_id, conversation_id, limit=self.memory_limit
@@ -130,8 +133,7 @@ class MemosIntegratorPlugin(Star):
                 # 保持prompt为原始用户消息
                 logger.info(f"已为会话 {session_id} 以system类型注入 {len(memories)} 条记忆")
             else:
-                # 使用user注入：保存原始prompt以便恢复
-                self.original_prompts[session_id] = user_message
+                # 使用user注入：更新prompt为包含记忆的版本
                 req.prompt = memory_prompt
                 logger.info(f"已为会话 {session_id} 以user类型注入 {len(memories)} 条记忆")
             
