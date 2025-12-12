@@ -18,23 +18,10 @@
     "default": 5
   },
   "prompt_language": {
-    "type": "select",
     "description": "记忆提示词语言",
-    "hint": "选择记忆注入时使用的提示词语言",
-    "default": "auto",
-    "options": [
-      {
-        "label": "自动检测",
-        "value": "auto"
-      },
-      {
-        "label": "中文",
-        "value": "zh"
-      },
-      {
-        "label": "English",
-        "value": "en"
-      }
-    ]
+    "type": "string",
+    "options": ["auto", "zh", "en"],
+    "hint": "auto: 自动检测; zh: 中文; en: English",
+    "default": "auto"
   }
 }
