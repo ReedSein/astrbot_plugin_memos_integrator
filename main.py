@@ -4,8 +4,7 @@ MemOS记忆集成插件
 """
 
 import asyncio
-import requests
-import json
+import sqlite3
 from typing import Dict, List
 from pathlib import Path
 from astrbot.api.event import filter, AstrMessageEvent
@@ -17,7 +16,7 @@ from .memory_manager import MemoryManager
 from .commands_handler import CommandsHandler
 
 # 主插件类
-@register("astrbot_plugin_memos_integrator","zz6zz666", "MemOS记忆集成插件", "1.5.0")
+@register("astrbot_plugin_memos_integrator","zz6zz666", "MemOS记忆集成插件", "1.6.0")
 class MemosIntegratorPlugin(Star):
     PLUGIN_ID = "astrbot_plugin_memos_integrator"
     
@@ -32,12 +31,15 @@ class MemosIntegratorPlugin(Star):
         # 初始化基础目录和数据目录
         self._base_dir = Path(__file__).resolve().parent
         self._data_dir = self._resolve_data_dir()
-        # 消息缓存文件路径
-        self._cache_file = self._data_dir / "message_cache.json"
+        # 数据库文件路径
+        self._db_file = self._data_dir / "message_cache.db"
         # 确保数据目录存在
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        # 从文件加载缓存数据
-        self.message_buffer: Dict[str, List[Dict[str, str]]] = self._load_cache() 
+        # 初始化数据库连接
+        self._db_conn = sqlite3.connect(self._db_file)
+        self._init_db()
+        # 初始化空的消息缓冲区，我们现在主要依赖数据库
+        self.message_buffer: Dict[str, List[Dict[str, str]]] = {} 
 
         # 用于保存原始prompt的字典，key为session_id
         self.original_prompts = {}
@@ -89,24 +91,70 @@ class MemosIntegratorPlugin(Star):
                 logger.warning(f"[MemOS记忆集成插件] 创建数据目录失败({exc})，退回 fallback：{fallback_dir}")
         fallback_dir.mkdir(parents=True, exist_ok=True)
         return fallback_dir
-
-    def _load_cache(self) -> Dict[str, List[Dict[str, str]]]:
-        """从文件加载缓存数据"""
+    
+    def _init_db(self):
+        """初始化数据库表结构"""
+        cursor = self._db_conn.cursor()
+        # 创建消息缓存表
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_cache (
+            conversation_id TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, message_id)
+        )
+        ''')
+        # 创建索引以提高查询性能
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_conversation_id ON message_cache (conversation_id)
+        ''')
+        self._db_conn.commit()
+    
+    def _save_message_to_db(self, conversation_id: str, role: str, content: str):
+        """将单条消息保存到数据库"""
+        cursor = self._db_conn.cursor()
+        
         try:
-            if self._cache_file.exists():
-                with open(self._cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+            # 获取当前会话的最大消息ID，用于确定下一个消息ID
+            cursor.execute('SELECT MAX(message_id) FROM message_cache WHERE conversation_id = ?', (conversation_id,))
+            max_id = cursor.fetchone()[0]
+            next_id = max_id + 1 if max_id is not None else 0
+            
+            # 插入新消息
+            cursor.execute(
+                'INSERT INTO message_cache (conversation_id, message_id, role, content) VALUES (?, ?, ?, ?)',
+                (conversation_id, next_id, role, content)
+            )
+            
+            self._db_conn.commit()
+            
         except Exception as e:
-            logger.error(f"加载缓存数据失败: {e}")
-        return {}
-
-    def _save_cache(self):
-        """将缓存数据保存到文件"""
+            logger.error(f"将消息保存到数据库失败: {e}")
+            self._db_conn.rollback()
+    
+    def _clear_conversation_cache(self, conversation_id: str):
+        """清空特定会话的缓存"""
+        cursor = self._db_conn.cursor()
+        
         try:
-            with open(self._cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self.message_buffer, f, ensure_ascii=False, indent=2)
+            cursor.execute('DELETE FROM message_cache WHERE conversation_id = ?', (conversation_id,))
+            self._db_conn.commit()
         except Exception as e:
-            logger.error(f"保存缓存数据失败: {e}")
+            logger.error(f"清空会话缓存失败: {e}")
+            self._db_conn.rollback()
+    
+    def _get_conversation_message_count(self, conversation_id: str) -> int:
+        """获取特定会话的消息数量"""
+        cursor = self._db_conn.cursor()
+        
+        try:
+            cursor.execute('SELECT COUNT(*) FROM message_cache WHERE conversation_id = ?', (conversation_id,))
+            count = cursor.fetchone()[0]
+            return count
+        except Exception as e:
+            logger.error(f"获取会话消息数量失败: {e}")
+            return 0
 
     def _get_session_id(self, event: AstrMessageEvent) -> str:
         """获取会话ID（统一消息来源）"""
@@ -234,30 +282,25 @@ class MemosIntegratorPlugin(Star):
                 
                 logger.info(f"会话 {conversation_id} 直接上传1轮对话...")
             else:
-                # 初始化该会话的缓存
-                if conversation_id not in self.message_buffer:
-                    self.message_buffer[conversation_id] = []
-
-                # 将当前轮次的对话加入缓存
-                self.message_buffer[conversation_id].append({"role": "user", "content": user_message})
-                self.message_buffer[conversation_id].append({"role": "assistant", "content": ai_response})
-                
-                # 保存缓存到文件
-                self._save_cache()
+                # 将当前轮次的对话保存到数据库
+                self._save_message_to_db(conversation_id, "user", user_message)
+                self._save_message_to_db(conversation_id, "assistant", ai_response)
                 
                 # 计算当前缓存的对话轮数 (消息数 / 2)
-                current_rounds = len(self.message_buffer[conversation_id]) // 2
+                message_count = self._get_conversation_message_count(conversation_id)
+                current_rounds = message_count // 2
                 
                 logger.debug(f"会话 {conversation_id} 当前缓存: {current_rounds}/{self.upload_interval} 轮")
 
                 # 检查是否达到上传阈值
                 if current_rounds >= self.upload_interval:
-                    # 准备上传的消息列表（复制一份）
-                    messages_to_upload = list(self.message_buffer[conversation_id])
-                    # 清空缓存
-                    self.message_buffer[conversation_id] = []
-                    # 保存清空后的缓存到文件
-                    self._save_cache()
+                    # 从数据库加载该会话的所有消息用于上传
+                    cursor = self._db_conn.cursor()
+                    cursor.execute('SELECT role, content FROM message_cache WHERE conversation_id = ? ORDER BY message_id', (conversation_id,))
+                    messages_to_upload = [{'role': role, 'content': content} for role, content in cursor.fetchall()]
+                    
+                    # 清空数据库中的缓存
+                    self._clear_conversation_cache(conversation_id)
                     
                     logger.info(f"会话 {conversation_id} 达到上传阈值 ({current_rounds}轮)，准备批量上传...")
                 else:
