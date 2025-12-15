@@ -59,8 +59,11 @@ class MemosIntegratorPlugin(Star):
             self.upload_interval = self.config.get("upload_interval", 1) # 获取上传频率配置
             
             # 新增配置：控制群聊和私聊场景下的注入类型
-            self.group_injection_type = self.config.get("group_injection_type", "user")  # 群聊注入类型: "user" 或 "system"
-            self.private_injection_type = self.config.get("private_injection_type", "user")  # 私聊注入类型: "user" 或 "system"
+            self.group_injection_type = self.config.get("group_injection_type", "system")  # 群聊注入类型: "user" 或 "system"
+            self.private_injection_type = self.config.get("private_injection_type", "system")  # 私聊注入类型: "user" 或 "system"
+
+            # 新增配置：自定义Prompt模板
+            self.custom_prompt_template = self.config.get("custom_prompt_template", "")
 
             # 初始化记忆管理器
             self.memory_manager = MemoryManager(
@@ -175,7 +178,7 @@ class MemosIntegratorPlugin(Star):
 
         return conversation_id
         
-    @filter.on_llm_request(priority=-1000)
+    @filter.on_llm_request(priority=100)
     async def inject_memories(self, event: AstrMessageEvent, req: ProviderRequest):
         """在LLM请求前获取记忆并注入"""
         if self.memory_manager is None:
@@ -209,7 +212,8 @@ class MemosIntegratorPlugin(Star):
             
             # 构建记忆提示词
             memory_prompt = await self.memory_manager.inject_memory_to_prompt(
-                user_message, memories, language, injection_type
+                user_message, memories, language, injection_type, 
+                custom_template=self.custom_prompt_template
             )
             
             if injection_type == "system":
