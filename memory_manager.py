@@ -285,7 +285,7 @@ class MemoryManager:
             logger.error(f"更新记忆时出错: {e}")
             return False
 
-    async def inject_memory_to_prompt(self, original_prompt: str, memories: List[Dict], language: str = "zh", injection_type: str = "user") -> str:
+    async def inject_memory_to_prompt(self, original_prompt: str, memories: List[Dict], language: str = "zh", injection_type: str = "user", custom_template: str = None) -> str:
         """将记忆注入到用户提示中
 
         Args:
@@ -294,6 +294,7 @@ class MemoryManager:
             language: 语言,"zh"为中文,"en"为英文
             model_type: 模型类型,"default"为默认模型,"qwen"为通义千问模型
             injection_type: 注入类型,"user"为用户注入,"system"为系统注入
+            custom_template: 自定义模板字符串，如果提供则优先使用
 
         Returns:
             注入记忆后的提示
@@ -310,11 +311,18 @@ class MemoryManager:
             # 获取当前时间
             current_time = time.strftime("%Y-%m-%d %H:%M", time.localtime())
 
-            # 获取记忆注入模板
-            template = MemoryTemplates.get_injection_template(language, injection_type)
-            logger.debug(f"使用的记忆注入模板类型: {language}-{injection_type}")
+            if custom_template:
+                # 使用自定义模板
+                template = custom_template
+                logger.debug("使用自定义记忆注入模板")
+            else:
+                # 获取默认记忆注入模板
+                template = MemoryTemplates.get_injection_template(language, injection_type)
+                logger.debug(f"使用的记忆注入模板类型: {language}-{injection_type}")
 
             # 填充模板
+            # 尝试填充，如果模板中没有对应的占位符也不会报错（使用safe_substitute风格或保留原样？format会报错）
+            # 这里我们假设用户知道可用的变量：original_query, memory_content, current_time
             injected_prompt = template.format(
                 original_query=original_prompt,
                 memory_content=memory_content,
